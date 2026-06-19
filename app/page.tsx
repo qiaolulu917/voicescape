@@ -1,3 +1,7 @@
+"use client";
+
+import ObjectPanel from "@/components/ObjectPanel";
+
 export default function Home() {
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-zinc-100">
@@ -12,8 +16,8 @@ export default function Home() {
       {/* 主体区域 */}
       <div className="flex flex-1 overflow-hidden">
         {/* 左侧对象面板 25% */}
-        <aside className="w-1/4 bg-zinc-50 border-r border-zinc-200 overflow-y-auto p-4 shrink-0">
-          <p className="text-sm text-zinc-400 text-center mt-8">对象面板占位</p>
+        <aside className="w-1/4 bg-zinc-50 border-r border-zinc-200 overflow-y-auto shrink-0">
+          <ObjectPanel />
         </aside>
 
         {/* 右侧画布 75% */}
