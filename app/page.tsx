@@ -3,9 +3,15 @@
 import { useState } from "react";
 import ObjectPanel from "@/components/ObjectPanel";
 import FeedbackBar from "@/components/FeedbackBar";
+import VoiceButton from "@/components/VoiceButton";
 
 export default function Home() {
   const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  function handleVoiceResult(text: string) {
+    setFeedbackMessage(`你说的是：${text}`);
+  }
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-zinc-100">
@@ -35,9 +41,7 @@ export default function Home() {
         <FeedbackBar message={feedbackMessage} />
         {/* 语音按钮区 */}
         <div className="flex items-center justify-center pb-4">
-          <button className="flex items-center gap-2 px-6 py-3 bg-zinc-600 hover:bg-zinc-500 text-white rounded-full text-sm font-medium transition-colors">
-            🎤 点击说话
-          </button>
+          <VoiceButton onResult={handleVoiceResult} isProcessing={isProcessing} />
         </div>
       </footer>
     </div>
