@@ -1,7 +1,7 @@
 # VoiceScape 实施计划
 
-- **开始时间**：2026-06-13（今天）
-- **截止时间**：2026-06-14 23:00
+- **开始时间**：2026-06-19（今天）
+- **截止时间**：2026-06-20 23:00
 - **总可用时间**：约 36 小时
 - **开发方式**：Vibecoding（AI 辅助编码）
 - **PR 数量**：22 个 PR
@@ -55,9 +55,30 @@
    - `ObjectPosition`（含 x、y 数字类型）
    - `ObjectSize`（含 width、height）
    - `ObjectAttributes`（含可选的 color 字符串）
-   - `Relation`（含 subject_id、relation、object_id）
+   - `Relation`（含 subject_id、relation_type: "positional" | "attachment"、relation、object_id）
    - `SceneState`（含 scene_summary、background_image_url、objects 数组、relations 数组）
-   - `SceneOperation`（含 intent 联合类型：create/move/delete/scale/recolor/set_background/clarify/confirm/cancel，以及可选的操作参数字段）
+   - `ObjectToCreate`（含 type、display_name、可选 attributes）
+   - `SceneOperation`：intent 联合类型为 `create | move | delete | scale | recolor | ask_background | set_background | clarify | confirm | cancel`，各 intent 对应字段如下：
+     ```ts
+     // create
+     { intent: "create"; objects_to_create: ObjectToCreate[] }
+     // move
+     { intent: "move"; target_display_name: string; position: { relation: string; reference_display_name?: string }; risk_level: "L1" | "L2" | "L3" }
+     // delete
+     { intent: "delete"; target_display_name?: string; target_all_of_type?: string; risk_level: "L1" | "L2" | "L3" }
+     // scale
+     { intent: "scale"; target_display_name: string; scale: "larger" | "smaller"; risk_level: "L1" }
+     // recolor
+     { intent: "recolor"; target_display_name: string; new_color: string; risk_level: "L1" }
+     // ask_background（Claude 针对当前场景生成的追问）
+     { intent: "ask_background"; question: string }
+     // set_background（用户主动说设置背景时）
+     { intent: "set_background"; description: string }
+     // clarify（有歧义时）
+     { intent: "clarify"; clarification_question: string; ambiguous_targets: string[] }
+     // confirm / cancel（用户确认或取消）
+     { intent: "confirm" } | { intent: "cancel" }
+     ```
 3. 导出所有类型
 4. 创建 PR 并合并
 
@@ -162,12 +183,13 @@
 
 **步骤：**
 1. 创建 `components/VoiceButton.tsx`
-2. 组件内部实现三个状态的切换（idle / recording / processing），对应 design-document.md 第六节的视觉反馈表格
-3. 录音状态下按钮变为红色脉冲动画
-4. 使用 Web Speech API，设置语言为 `zh-CN`，点击开始/再次点击停止
-5. 识别完成后，将识别结果文字通过 `onResult` 回调传给父组件
-6. 识别期间及识别完成前显示 processing 状态
-7. 在 `app/page.tsx` 中将 VoiceButton 放入底部区域，onResult 先只是更新 feedbackMessage（显示「你说的是：[识别文字]」）
+2. 组件接收两个外部 prop：`onResult: (text: string) => void` 和 `isProcessing: boolean`
+   - **注意：processing 状态由父组件（page.tsx）控制**，而非 VoiceButton 内部自行管理。原因：生图 + 去背景管道最长约 30-40 秒，VoiceButton 在 STT 结束后不能自行退出 processing 状态
+3. 组件内部仅维护 `idle` 和 `recording` 两个内部状态；父组件传入 `isProcessing=true` 时显示处理中样式
+4. 视觉状态对应 design-document.md 第六节的视觉反馈表格：idle=灰色 / recording=红色脉冲 / isProcessing=旋转加载
+5. 使用 Web Speech API，设置语言为 `zh-CN`，点击开始/再次点击停止
+6. 识别完成后，将识别结果文字通过 `onResult` 回调传给父组件，VoiceButton 自身回到 idle 状态（processing 由父组件置为 true）
+7. 在 `app/page.tsx` 中将 VoiceButton 放入底部区域，onResult 先只是更新 feedbackMessage（显示「你说的是：[识别文字]」），isProcessing 先传 false
 8. 创建 PR 并合并
 
 **验证：**
@@ -205,18 +227,29 @@
 
 ### PR 9 — /api/parse 路由（Claude 解析）
 
-**目标：** 实现语音文字 → 场景操作 JSON 的解析接口
+**目标：** 实现语音文字 → 场景操作 JSON 的解析接口，同时支持背景追问生成和指代消解续解
 
 **步骤：**
 1. 创建 `app/api/parse/route.ts`
-2. 接收 POST 请求，body 为 `{ text: string, currentState: SceneState, selectedObjectId?: string }`
-3. 使用 `@anthropic-ai/sdk` 调用 Claude claude-haiku-4-5 模型
-4. System Prompt 要告知 Claude：当前场景状态（对象列表、关系列表、选中对象），以及它需要返回的 JSON 格式（SceneOperation 结构）
-5. User Prompt 就是用户说的话（text 字段）
-6. 要求 Claude 必须返回纯 JSON，不含其他文字
-7. 解析 Claude 返回的 JSON 字符串，以 `{ operation: SceneOperation }` 格式返回给前端
-8. 添加错误处理：Claude 调用失败时返回 `{ error: "解析失败" }`
-9. 创建 PR 并合并
+2. 接收 POST 请求，body 为：
+   ```ts
+   {
+     text: string,
+     currentState: SceneState,
+     selectedObjectId?: string,
+     mode?: "normal" | "ask_background" | "clarify_resolve",
+     pendingOperation?: SceneOperation   // 仅 clarify_resolve 时携带
+   }
+   ```
+3. 使用 `@anthropic-ai/sdk` 调用 `claude-haiku-4-5` 模型
+4. 根据 `mode` 字段使用不同 System Prompt：
+   - **`normal`（默认）**：告知当前场景对象/关系/选中对象，要求返回 SceneOperation JSON
+   - **`ask_background`**：告知当前对象列表（display_name + type），要求返回 `{ intent: "ask_background", question: "..." }`，question 应结合具体对象内容（如「你们骑马去朋友家，希望背景是什么环境？」）
+   - **`clarify_resolve`**：告知 pendingOperation 的内容和用户的澄清文字，要求在 pendingOperation 基础上补全 target，返回完整可执行的 SceneOperation
+5. 所有模式下均要求 Claude 返回纯 JSON，不含其他文字
+6. 解析返回 JSON，以 `{ operation: SceneOperation }` 格式返回给前端
+7. 添加错误处理：调用失败时返回 `{ error: "解析失败" }`
+8. 创建 PR 并合并
 
 **验证：**
 - 用 Postman 或 curl 向 `localhost:3000/api/parse` 发送 POST 请求
@@ -233,11 +266,19 @@
 
 **步骤：**
 1. 创建 `app/api/generate/route.ts`
-2. 接收 POST 请求，body 为 `{ type: "object" | "background", description: string, attributes?: ObjectAttributes }`
+2. 接收 POST 请求，body 为：
+   ```ts
+   {
+     type: "object" | "background",
+     description: string,
+     attributes?: ObjectAttributes,
+     existingObjects?: string[]   // 仅 background 时传入，如 ["马", "房屋", "朋友"]
+   }
+   ```
 3. 使用 `@google/genai` 调用 Gemini 2.5 Flash Image 模型
-4. 当 type 为 `object` 时：使用 tech-stack.md 第 2.8 节的对象生图 Prompt 模板构造 prompt，生成白底图片
-5. 当 type 为 `background` 时：使用背景图 Prompt 模板，生成场景背景图
-6. 将生成的图片以 base64 字符串形式返回给前端，格式为 `{ imageBase64: string, mimeType: string }`
+4. 当 type 为 `object` 时：使用 tech-stack.md 第 2.8 节对象 Prompt 模板，生成白底图片
+5. 当 type 为 `background` 时：在背景 Prompt 模板基础上，将 `existingObjects` 拼入 prompt，如：`"A flat illustration landscape of [描述], featuring [马, 房屋, 朋友], wide panoramic view, flat illustration style, soft colors, children book style"`，确保背景与已有对象语义一致
+6. 将生成的图片以 base64 字符串返回，格式为 `{ imageBase64: string, mimeType: string }`
 7. 添加错误处理：生图失败时返回 `{ error: "生图失败" }`
 8. 创建 PR 并合并
 
@@ -276,18 +317,30 @@
 
 ### PR 12 — 场景创建流程：语音 → 解析 → 对象生成 → 渲染
 
-**目标：** 打通第一个完整流程：说一句话，场景里出现对应对象
+**目标：** 打通第一个完整流程：说一句话，场景里出现对应对象，并触发针对性背景追问
 
 **步骤：**
-1. 在 `app/page.tsx` 中，当 VoiceButton 的 onResult 触发后，执行以下串行流程：
+1. 在 `app/page.tsx` 中添加 `objectTypeCounters` 状态（`Record<string, number>`，如 `{ horse: 1, house: 1 }`），用于前端生成对象 ID
+
+2. 在 `app/page.tsx` 的 `handleVoiceResult` 函数中（同时将 `isProcessing` 置为 true 传给 VoiceButton），执行以下流程：
+   
+   **阶段一：解析 + 生成对象**
    a. 更新 feedbackMessage 为「识别到：[text]，正在解析...」
-   b. 调用 /api/parse，传入识别文字和当前 SceneState
-   c. 若 intent 为 `create`：对每个新对象依次调用 /api/generate（type=object），再调用 /api/removebg
-   d. 将返回的透明 PNG base64 转为 data URL，作为 image_url 存入新 SceneObject
-   e. 为新对象分配初始位置（画布中心偏移，多个对象均匀分散）
-   f. 调用 SceneContext 的 addObject 添加到状态
-   g. 更新 feedbackMessage 为「已创建 N 个对象：...」
-2. 若 intent 为 `ask_background`（系统追问背景），更新 feedbackMessage 为「你希望场景的背景是什么环境？」并设置一个「等待背景输入」的标志位
+   b. 调用 `/api/parse`（mode="normal"），传入识别文字和当前 SceneState
+   c. 若 intent 为 `create`：
+      - 对 `objects_to_create` 中每个对象，从 `objectTypeCounters` 生成 ID（如 `horse` 计数 +1 → `horse_001`），同步更新计数器
+      - 依次调用 `/api/generate`（type=object）再调用 `/api/removebg`，每完成一个更新一次 feedbackMessage（「正在生成 [display_name]...」）
+      - 将透明 PNG base64 转为 data URL，连同 ID、display_name、type、attributes 构造 SceneObject，初始位置：画布按对象数量等分水平排列（x = 画布宽 / (n+1) * i，y = 画布高 40%）
+      - 调用 `addObject` 添加到状态
+   d. 更新 feedbackMessage 为「已创建 N 个对象：[display_name 列表]」
+
+   **阶段二：触发背景追问**
+   e. 对象全部创建完成后，立即调用 `/api/parse`（mode="ask_background"，传入更新后的 SceneState）
+   f. Claude 返回 `{ intent: "ask_background", question: "..." }`
+   g. 更新 feedbackMessage 为 Claude 生成的 question 文字
+   h. 设置 `waitingForBackground = true` 标志位
+   i. 将 `isProcessing` 置为 false（此时用户可以再次录音回答背景问题）
+
 3. 创建 PR 并合并
 
 **验证：**
@@ -304,14 +357,15 @@
 **目标：** 实现场景背景的生成和渲染
 
 **步骤：**
-1. 在 PR 12 的流程基础上，补充背景处理逻辑：
-   - 若检测到「等待背景输入」标志位且用户说了一句话，将该句话作为背景描述
-   - 调用 /api/generate（type=background），传入背景描述
-   - 将返回的图片 base64 转为 data URL，调用 SceneContext 的 setBackground 更新
-   - 清除「等待背景输入」标志位
-   - 更新 feedbackMessage 为「背景已设置：[描述]」
-2. 首次创建对象完成后，自动发送追问：「你希望场景的背景是什么环境？」
-3. 创建 PR 并合并
+1. 在 `handleVoiceResult` 开头，先检测 `waitingForBackground` 标志位：
+   - 若为 true：将用户本次说的话视为背景描述，**不走 /api/parse 解析**，直接进入背景生成流程
+   - 从 SceneContext 取出当前所有对象的 display_name，作为 `existingObjects` 数组
+   - 调用 `/api/generate`（type=background，传入用户描述 + existingObjects），Prompt 会将对象名拼入背景描述以保证语义一致
+   - 将返回的图片 base64 转为 data URL，调用 `setBackground(url, description)` 更新 SceneState
+   - 清除 `waitingForBackground` 标志位
+   - 更新 feedbackMessage 为「背景已设置：[描述]」，将 `isProcessing` 置为 false
+   - return，不继续执行后续的 parse 逻辑
+2. 创建 PR 并合并
 
 **验证：**
 - 说「创建一匹马和一座房子」，等待对象生成
@@ -341,18 +395,27 @@
 
 ### PR 15 — 对象移动功能
 
-**目标：** 通过语音命令移动指定对象在画布上的位置
+**目标：** 通过语音命令移动指定对象在画布上的位置，同时写入位置关系到 relations 数组
 
 **步骤：**
-1. 在 /api/parse 路由的 System Prompt 中，补充说明移动操作的返回格式（含 target、position.relation、position.reference）
+1. 在 /api/parse 路由的 System Prompt 中，补充说明移动操作的返回格式（含 target_display_name、position.relation、position.reference_display_name）
 2. 在前端，当解析结果 intent 为 `move` 时：
    - 根据 target_display_name 找到目标对象的 id
    - 根据 position.relation（left_of / right_of / front_of / behind / next_to）和 reference_display_name 找到参考对象
-   - 根据关系规则计算新的 position.x、position.y 和 z_index（如 front_of = y 增大 + z_index 增大）
+   - 根据关系规则计算新的 position.x、position.y 和 z_index：
+     - `front_of`：y = 参考对象 y + 80px，z_index = 参考对象 z_index + 1
+     - `behind`：y = 参考对象 y - 80px，z_index = 参考对象 z_index - 1
+     - `left_of`：x = 参考对象 x - 参考对象 width - 20px，y/z 不变
+     - `right_of`：x = 参考对象 x + 参考对象 width + 20px，y/z 不变
+     - `next_to`：同 right_of
    - 调用 SceneContext 的 updateObject 更新位置
-3. 若选中了对象，「它」「这个」等代词自动指向选中对象
-4. 更新 feedbackMessage 为「已移动：[对象名] → [位置描述]」
-5. 创建 PR 并合并
+3. **更新 relations 数组**：添加一条新的位置关系（relation_type: "positional"），**不删除该对象已有的其他关系**（如 "骑着" 等依附关系保留共存）：
+   ```ts
+   addRelation({ subject_id: targetId, relation_type: "positional", relation: position.relation, object_id: referenceId })
+   ```
+4. 若选中了对象，「它」「这个」等代词自动指向选中对象（System Prompt 中告知 Claude 当前 selectedObjectId 对应的 display_name）
+5. 更新 feedbackMessage 为「已移动：[对象名] → [参考对象名][位置关系]」
+6. 创建 PR 并合并
 
 **验证：**
 - 创建马和房子后，说「把马移到房子前面」
@@ -459,13 +522,20 @@
 **目标：** 当用户语音有歧义时，系统追问并等待用户澄清
 
 **步骤：**
-1. /api/parse 补充 clarify 意图的返回格式（含 clarification_question 字符串，列出存在歧义的对象）
-2. 前端当 intent 为 `clarify` 时：
+1. /api/parse 的 `clarify` intent 返回格式已在 PR 9 中定义（含 clarification_question、ambiguous_targets）
+2. 在 `app/page.tsx` 中，当 intent 为 `clarify` 时：
    - 更新 feedbackMessage 为 clarification_question
-   - 设置「等待澄清」标志位，记录原始 operation 的其他字段
-3. 用户下次录音后，将澄清内容和原始 operation 一起再次发给 /api/parse 重新解析
-4. 解析后正常执行操作
-5. 创建 PR 并合并
+   - 设置 `waitingForClarification = true` 标志位
+   - 将整个 operation 对象（除 intent 外的所有字段）存入 `pendingOperation` 状态
+3. 在 `handleVoiceResult` 开头，检测 `waitingForClarification` 标志位：
+   - 若为 true：调用 `/api/parse`（mode="clarify_resolve"），body 携带：
+     - `text`：用户的澄清文字（如「左边那棵」）
+     - `currentState`：当前场景状态
+     - `pendingOperation`：之前存储的 pendingOperation
+   - Claude 在 System Prompt 引导下，基于澄清内容补全 target，返回完整可执行的 SceneOperation
+   - 清除 `waitingForClarification` 和 `pendingOperation` 状态
+   - 用返回的完整 operation 正常执行对应操作（走已有的 move/delete/scale 等逻辑）
+4. 创建 PR 并合并
 
 **验证：**
 - 创建两棵树（树1、树2），说「把树移到右边」
