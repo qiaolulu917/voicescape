@@ -4,6 +4,7 @@ import { useState } from "react";
 import ObjectPanel from "@/components/ObjectPanel";
 import FeedbackBar from "@/components/FeedbackBar";
 import VoiceButton from "@/components/VoiceButton";
+import SceneCanvas from "@/components/SceneCanvas";
 
 export default function Home() {
   const [feedbackMessage, setFeedbackMessage] = useState("");
@@ -31,8 +32,8 @@ export default function Home() {
         </aside>
 
         {/* 右侧画布 75% */}
-        <main className="flex-1 bg-white overflow-hidden flex items-center justify-center">
-          <p className="text-sm text-zinc-300">画布占位</p>
+        <main className="flex-1 overflow-hidden">
+          <SceneCanvas />
         </main>
       </div>
 
