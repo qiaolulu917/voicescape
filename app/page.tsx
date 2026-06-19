@@ -1,8 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import ObjectPanel from "@/components/ObjectPanel";
+import FeedbackBar from "@/components/FeedbackBar";
 
 export default function Home() {
+  const [feedbackMessage, setFeedbackMessage] = useState("");
+
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-zinc-100">
       {/* 顶部标题栏 */}
@@ -28,10 +32,7 @@ export default function Home() {
 
       {/* 底部区域 */}
       <footer className="shrink-0 bg-zinc-800 border-t border-zinc-700">
-        {/* 文字反馈区 */}
-        <div className="px-6 py-3 min-h-[56px] flex items-center">
-          <p className="text-sm text-zinc-300">准备就绪，点击麦克风开始创作</p>
-        </div>
+        <FeedbackBar message={feedbackMessage} />
         {/* 语音按钮区 */}
         <div className="flex items-center justify-center pb-4">
           <button className="flex items-center gap-2 px-6 py-3 bg-zinc-600 hover:bg-zinc-500 text-white rounded-full text-sm font-medium transition-colors">
